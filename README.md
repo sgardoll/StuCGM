@@ -1,7 +1,31 @@
-StuCGM is a driver for the Hubitat smart home hub that allows users to access their most recent blood glucose value from a continuous glucose monitor (CGM) via Nightscout. The driver returns the value in mmol/L, but it can also return the value in mg/dL by removing a few lines of code. The driver also includes a few thresholds for low and high blood sugar levels, and it has a flag that indicates whether to use mmol/L or mg/dL.
+# MyCGM
 
-This driver allows you to easily monitor your blood glucose levels in real-time and build automations based on the data. Simply add your Nightscout details into the code at the places indicated and you'll be able to access your latest readings directly from within Hubitat.
+A new Flutter project.
 
+## Getting Started
 
+FlutterFlow projects are built to run on the Flutter _stable_ release.
 
-Heavily ased on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
+### IMPORTANT:
+
+For projects with Firestore integration, you must first run the following commands to ensure the project compiles:
+
+```
+flutter pub get
+flutter packages pub run build_runner build --delete-conflicting-outputs
+```
+
+This command creates the generated files that parse each Record from Firestore into a schema object.
+
+### Getting started continued:
+
+This project is a starting point for a Flutter application.
+
+A few resources to get you started if this is your first Flutter project:
+
+- [Lab: Write your first Flutter app](https://flutter.dev/docs/get-started/codelab)
+- [Cookbook: Useful Flutter samples](https://flutter.dev/docs/cookbook)
+
+For help getting started with Flutter, view our
+[online documentation](https://flutter.dev/docs), which offers tutorials,
+samples, guidance on mobile development, and a full API reference.
