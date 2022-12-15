@@ -17,9 +17,10 @@ attribute "CustomTile2", "string"
 
 def refresh() { ( sendSyncCmd() ) }
 
+// Change [NIGHTSCOUT_URL] to your own Nightscout URL
 def sendSyncCmd() {
 def params = [
-uri: "http://stucgm.chickenkiller.com/api/v1/entries/current.json",
+uri: "http://[NIGHTSCOUT_URL]/api/v1/entries/current.json",
 contentType: "application/json",
 requestContentType: "application/json",
 ]
@@ -30,11 +31,7 @@ log.warn "Did not received valid data!"
 }
 else {
 def jsontext = response.data
-
-// log.debug "Received: " + jsontext
-// log.debug "Cari's number is: " + jsontext[0].sgv
 def SGV1 = jsontext[0].sgv
-def SGV2 = "65"
 def float SGV = SGV1
 
 def SGVdir = jsontext [0].direction
@@ -48,11 +45,11 @@ def SGVarrow = ""
 
 // convert SGV from mg/dL to mmol/L
 // display it to 1 decimal place
+// remove these 2 lines if you want the value to show as mg/dL
 SGV = SGV/18
 SGV = SGV.round(1)
     
-// def last = device.currentValue("last_num2")
-// log.debug SGV
+
 sendEvent(name: "SGV", value: SGV, display: true , displayed: true)
 if(SGV < low2) {
 SGVstate1 = "VeryLow"
@@ -83,37 +80,28 @@ SGVshadow = " #39ff14 "
                SGVstate1 = "NO"
                SGVcolor = " #DD0048 "
                SGVshadow = " #DD0048 "
- //              SGV = 000
-                //  SGVarrow = '<img src="https://192.168.10.1/singlearrowright.png"></img>'
             }
             SGVcolor = "#FFFFFF"
             if(SGVdir == "Flat") {
                SGVdir1 = 'Steady '
-               SGVarrow = '<img src="https://192.168.10.1/singlearrowright.png"></img>'
             }
             if(SGVdir == "FortyFiveUp") {
                SGVdir1 = 'Rising '
-                SGVarrow = '<img src="https://192.168.10.1/45uparrow.png"></img>'
             }
             if(SGVdir == "SingleUp") {
                SGVdir1 = 'Rising '
-                SGVarrow = '<img src="https://192.168.10.1/singlearrowup.png"></img>'
             }
             if(SGVdir == "DoubleUp") {
                SGVdir1 = 'Rising '
-                SGVarrow = '<img src="https://192.168.10.1/doublearrowup.png"></img>'
             }
             if(SGVdir == "FortyFiveDown") {
                SGVdir1 = 'Falling '
-                SGVarrow = '<img src="https://192.168.10.1/45downarrow.png"></img>'
             }
             if(SGVdir == "SingleDown") {
                SGVdir1 = 'Falling '
-                SGVarrow = '<img src="https://192.168.10.1/singlearrowdown.png"></img>'
             }
             if(SGVdir == "DoubleDown") {
                SGVdir1 = 'Falling '
-                SGVarrow = '<img src="https://192.168.10.1/doublearrowdown.png"></img>'
             }
              sendEvent(name: "SGVstate1", value: SGVstate1, display: true , displayed: true)
 
