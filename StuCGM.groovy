@@ -5,9 +5,9 @@
 import groovy.transform.Field
 metadata {
 definition (
-name: "CariCGM",
-namespace: "CariCGM",
-author: "Chris" )
+name: "StuCGM",
+namespace: "StuCGM",
+author: "Stuart Gardoll" )
 {
 capability "Refresh"
 attribute "SGV", "number"
@@ -19,7 +19,7 @@ def refresh() { ( sendSyncCmd() ) }
 
 def sendSyncCmd() {
 def params = [
-uri: "http://stucgm.herokuapp.com/api/v1/entries/current.json",
+uri: "http://stucgm.chickenkiller.com/api/v1/entries/current.json",
 contentType: "application/json",
 requestContentType: "application/json",
 ]
