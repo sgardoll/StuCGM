@@ -4,4 +4,4 @@ This driver allows you to easily monitor your blood glucose levels in real-time 
 
 
 
-Heavily ased on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
+Based on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
