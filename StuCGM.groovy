@@ -11,7 +11,7 @@ author: "Stuart Gardoll" )
 {
 capability "Refresh"
 attribute "SGV", "number"
-attribute "CustomTile2", "string"
+attribute "SGV_state", "string"
 }
 }
 
@@ -20,7 +20,7 @@ def refresh() { ( sendSyncCmd() ) }
 // Change [NIGHTSCOUT_URL] to your own Nightscout URL
 def sendSyncCmd() {
 def params = [
-uri: "http://[NIGHTSCOUT_URL]/api/v1/entries/current.json",
+uri: "http://stucgm.chickenkiller.com/api/v1/entries/current.json",
 contentType: "application/json",
 requestContentType: "application/json",
 ]
@@ -75,6 +75,7 @@ SGVshadow = " #39ff14 "
                 }
            }
            
+             sendEvent(name: "SGV_state", value: SGVstate1, display: true , displayed: true)
             if(SGVdir == "NOT COMPUTABLE") {
                SGVdir1 = 'DATA Received '
                SGVstate1 = "NO"
@@ -103,34 +104,6 @@ SGVshadow = " #39ff14 "
             if(SGVdir == "DoubleDown") {
                SGVdir1 = 'Falling '
             }
-             sendEvent(name: "SGVstate1", value: SGVstate1, display: true , displayed: true)
-
-            def CustomTile1Text = '<style>'
-
-        CustomTile1Text += '.CGMInfo {'
-   CustomTile1Text += ' font-size: 15px;'
-        CustomTile1Text += ' color: ' + SGVcolor
-        CustomTile1Text += '}'
-       
-        CustomTile1Text += '.CGMrow {'
-        CustomTile1Text += ' font-size: 40px;'
-       // CustomTile1Text += '    text-shadow: 0px 0px 0px ' + SGVshadow + ';'
-        CustomTile1Text += ' color: ' + SGVcolor + ';'
-        CustomTile1Text += '}'
-   CustomTile1Text += '#tile-63 { background-color: ' + SGVbackground
-            //+ '; text-shadow: none;}'
-           
-        CustomTile1Text += '</style>'
-           
-   CustomTile1Text += '<div class="CGMrow">'
-        CustomTile1Text += '' + SGV + ' ' + SGVarrow
-        CustomTile1Text += '<div class="CGMInfo">'
-   CustomTile1Text += ' ' + SGVstate1
-   CustomTile1Text += ' ' + SGVdir1  
-   CustomTile1Text += '</div>'
-   CustomTile1Text += '</div>'
-
-   sendEvent(name:"CustomTile2", value:CustomTile1Text, descriptionText:"CustomTile2")
         }
 }
 }
