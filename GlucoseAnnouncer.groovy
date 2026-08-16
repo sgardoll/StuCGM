@@ -5,7 +5,7 @@
  * reading out the current blood glucose level, then plays that mp3 on the selected Chromecast+ speakers.
  * The switch turns itself back off after a few seconds, so it behaves like a momentary button.
  *
- *   switch on -> GET <endpoint>  ->  body is a bare mp3 URL  ->  playTrackAndRestore(url) on each speaker
+ *   switch on -> GET <endpoint>  ->  body is JSON { url, voiceResponse }  ->  playTrackAndRestore(url) on each speaker
  */
 
 definition(
@@ -270,15 +270,30 @@ void levelsResponse(resp, data) {
         retryOrFail("HTTP ${status}")
         return
     }
-    if (!body || !(body ==~ /(?i)^https?:\/\/\S+$/)) {
-        logDebug "levelsResponse: unexpected body '${body}'"
+
+    String url = null
+    if (body) {
+        try {
+            def parsed = new groovy.json.JsonSlurper().parseText(body)
+            if (parsed instanceof Map && parsed.url) {
+                url = parsed.url as String
+                logDebug "levelsResponse: voiceResponse=${parsed.voiceResponse}"
+            }
+        } catch (ignored) { }
+        // fall back to a bare URL string for backward compatibility
+        if (!url && (body ==~ /(?i)^https?:\/\/\S+$/)) {
+            url = body
+        }
+    }
+    if (!url) {
+        logDebug "levelsResponse: no url in body '${body}'"
         retryOrFail("endpoint did not return a URL")
         return
     }
 
-    log.info "Glucose Announcer: got audio ${body}"
+    log.info "Glucose Announcer: got audio ${url}"
     state.lastResult = "played ${new Date().format('HH:mm:ss', location.timeZone)}"
-    playOnSpeakers(body, (data instanceof Map) ? data : [:])
+    playOnSpeakers(url, (data instanceof Map) ? data : [:])
 }
 
 private void retryOrFail(String reason) {
