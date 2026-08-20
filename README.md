@@ -19,6 +19,21 @@ This driver allows you to easily monitor your blood glucose levels in real-time 
 
 Based on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
 
+### Attributes
+
+| Attribute | Type | Notes |
+| --- | --- | --- |
+| `SGV` | number | Latest glucose value, mmol/L, 1 decimal place. |
+| `SGV_state` | string | `Normal` / `Low` / `VeryLow` / `High` (thresholds 4, 3 and 10 mmol/L). |
+| `SGVstate1` | string | Same state word, under the attribute name the dashboard and lighting rules read. |
+| `CustomTile2` | string | Ready-to-render HTML for the dashboard CGM tile (targets tile 63; red background when out of range, green when normal, plus a trend arrow). |
+| `SGV_background` | string | Background colour for the value, `rgba(...)`. |
+| `SGV_shadow` | string | Shadow colour for the value. |
+
+Refresh is driven by a Rule Machine rule (`StuCGM - Refresh CGM Every 5 Mins`) that calls `refresh()` every 5 minutes and also copies `SGV` into the `SGV-global` hub variable.
+
+> **Note (2026-08-20):** this file is the reconstructed merge of the repo's original driver and the customized variant that ran on the hub (which added `SGVstate1` and `CustomTile2`). The reconstruction was verified live against the hub's event history: the `High`-state tile output matches byte-for-byte, and the Rising arrow images (`45uparrow.png`, `singlearrowup.png`) are the observed ones. The remaining arrow filenames (`flatarrow`, `45downarrow`, `singlearrowdown`, `doublearrowup`, `doublearrowdown`) and the green Normal-state tile are symmetric extrapolations — check the dashboard the first time glucose is in range or falling.
+
 ---
 
 ## Glucose Announcer (app)
