@@ -35,7 +35,7 @@ import groovy.transform.Field
 // These are specific to one hub - on any other hub just pick the speakers on the app's page.
 // The principle to copy: pick the audio speakers, not TVs or displays, and never a cast group
 // as well as its members (casting to both at once makes them fight over the stream).
-@Field static final List<String> DEFAULT_SPEAKER_IDS = ["568", "569", "573", "574", "575", "580"]
+@Field static final List<String> DEFAULT_SPEAKER_IDS = ["902", "903", "905"]
 
 preferences {
     page(name: "mainPage")
