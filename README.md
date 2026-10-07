@@ -13,13 +13,31 @@ The two are independent — you can install either on its own.
 
 ## StuCGM (driver)
 
-StuCGM is a driver for the Hubitat smart home hub that allows users to access their most recent blood glucose value from a continuous glucose monitor (CGM) via Nightscout. The driver returns the value in mmol/L, but it can also return the value in mg/dL by removing a few lines of code. The driver also includes a few thresholds for low and high blood sugar levels, and it has a flag that indicates whether to use mmol/L or mg/dL.
+StuCGM is a driver for the Hubitat smart home hub that allows users to access their most recent blood glucose value from a continuous glucose monitor (CGM) via Nightscout. The driver returns the value in mmol/L, but it can also return the value in mg/dL by removing a few lines of code. The driver also includes a few thresholds for low and high blood sugar levels. Configuration is edited in the driver code, not in device preferences.
 
-This driver allows you to easily monitor your blood glucose levels in real-time and build automations based on the data. Simply add your Nightscout details into the code at the places indicated and you'll be able to access your latest readings directly from within Hubitat.
+The attributes can be used in Hubitat automations. Readings update when `refresh()` is called; the driver has no built-in polling schedule.
 
 Based on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
 
+### Install and configure
+
+1. Make a local copy of [StuCGM.groovy](StuCGM.groovy). Before saving or running it, change the code values below for your setup. The repository contains an author's endpoint and dashboard defaults; these are not shared services or device settings.
+
+   | Code location | Default / what to change |
+   | --- | --- |
+   | `params.uri` in `sendSyncCmd()` | Replace the existing URL with your own Nightscout `/api/v1/entries/current.json` endpoint, reachable from the hub. The driver sends no authentication header or token by default; any access needed by your endpoint must be handled in your local copy. |
+   | `SGV = SGV/18` and `SGV = SGV.round(1)` | Converts the incoming mg/dL value to mmol/L with one decimal place. To retain mg/dL, remove both lines in your local copy and also change the thresholds to the same units. There is no unit-selection flag. |
+   | `low1`, `low2`, `high1`, `high2` | Defaults are `4`, `3`, `10`, `18`. The comparisons use `low2`, `low1` and `high1`; `high2` is declared but unused. These are code defaults, not recommended treatment thresholds. |
+   | `#tile-63` in `tileHtml` | If using `CustomTile2`, change this selector to your dashboard tile ID. |
+   | Image URL in `tileHtml` | Replace the local `https://192.168.10.1/` image host with your own reachable host. The code names `flatarrow.png`, `45uparrow.png`, `singlearrowup.png`, `doublearrowup.png`, `45downarrow.png`, `singlearrowdown.png` and `doublearrowdown.png`; these image files are not included in this repository. |
+
+2. In the hub web interface, open **Developer Tools → Drivers Code → New Driver**, paste your locally configured code, and select **Save**. See Hubitat's [custom driver guide](https://docs2.hubitat.com/en/developer/driver/overview).
+3. Open **Devices → Add Device → Virtual**, give the device a name, and choose **StuCGM** for **Type**. Complete the virtual-device creation form. See Hubitat's [Add Device guide](https://docs2.hubitat.com/en/user-interface/devices/add-device).
+4. Open the new device's detail page, select the **Commands** tab, and run **Refresh** (see Hubitat's [Device Detail guide](https://docs2.hubitat.com/en/user-interface/devices/device-detail)). The driver expects an HTTP `200` response containing a JSON array whose first entry has `sgv` and `direction`; it uses those fields to update the attributes below. Check **Logs** if the request fails. This driver defines no **Preferences** inputs and no **Configure** command.
+
 ### Attributes
+
+These descriptions use the default mmol/L conversion.
 
 | Attribute | Type | Notes |
 | --- | --- | --- |
@@ -30,7 +48,19 @@ Based on the work of 'cfunk30' and the CariCGM project. More details about their
 | `SGV_background` | string | Background colour for the value, `rgba(...)`. |
 | `SGV_shadow` | string | Shadow colour for the value. |
 
-Refresh is driven by a Rule Machine rule (`StuCGM - Refresh CGM Every 5 Mins`) that calls `refresh()` every 5 minutes and also copies `SGV` into the `SGV-global` hub variable.
+### Refresh automatically with Rule Machine
+
+The driver only fetches data when its `refresh()` command runs. To create an external five-minute schedule, follow Hubitat's [Rule 5.1 guide](https://docs2.hubitat.com/en/apps/rule-machine/rule-5-1):
+
+1. Open **Automations → Rule Machine**. If it is not installed, use **Add Built-In Automation** to add Rule Machine.
+2. Select **Create New Rule** and name it `StuCGM - Refresh CGM Every 5 Mins` (or another name).
+3. Add a **Periodic schedule** trigger and configure it to run every **5 minutes**.
+4. In **Actions to Run**, add **Capture/Restore, Device Refresh or Polling → Refresh devices** and select your StuCGM virtual device.
+5. Finish the rule with **Done**. The rule supplies the schedule; installing the driver alone does not create it.
+
+The original hub also used the rule to copy the device's `SGV` into a hub variable named `SGV-global`. That is separate rule configuration, not a driver setting or a requirement for refresh; no rule export is included here.
+
+If a refresh request fails, the driver logs a warning or `HttpGet Error` and does not clear the previous attributes. It does not publish a reading timestamp or check how old the Nightscout reading is, so an existing value does not demonstrate that the latest refresh succeeded.
 
 > **Note (2026-08-20):** this file is the reconstructed merge of the repo's original driver and the customized variant that ran on the hub (which added `SGVstate1` and `CustomTile2`). The reconstruction was verified live against the hub's event history: the `High`-state tile output matches byte-for-byte, and the Rising arrow images (`45uparrow.png`, `singlearrowup.png`) are the observed ones. The remaining arrow filenames (`flatarrow`, `45downarrow`, `singlearrowdown`, `doublearrowup`, `doublearrowdown`) and the green Normal-state tile are symmetric extrapolations — check the dashboard the first time glucose is in range or falling.
 
