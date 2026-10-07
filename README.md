@@ -13,11 +13,27 @@ The two are independent — you can install either on its own.
 
 ## StuCGM (driver)
 
-StuCGM is a driver for the Hubitat smart home hub that allows users to access their most recent blood glucose value from a continuous glucose monitor (CGM) via Nightscout. The driver returns the value in mmol/L, but it can also return the value in mg/dL by removing a few lines of code. The driver also includes a few thresholds for low and high blood sugar levels, and it has a flag that indicates whether to use mmol/L or mg/dL.
+StuCGM is a driver for the Hubitat smart home hub that allows users to access their most recent blood glucose value from a continuous glucose monitor (CGM) via Nightscout. The driver returns the value in mmol/L, but it can also return the value in mg/dL by removing a few lines of code. The driver also includes a few thresholds for low and high blood sugar levels, Configuration is edited in the driver code, not in device preferences.
 
-This driver allows you to easily monitor your blood glucose levels in real-time and build automations based on the data. Simply add your Nightscout details into the code at the places indicated and you'll be able to access your latest readings directly from within Hubitat.
+The attributes can be used in Hubitat automations. Readings update when `refresh()` is called; the driver has no built-in polling schedule.
 
 Based on the work of 'cfunk30' and the CariCGM project. More details about their driver here: https://community.hubitat.com/t/maker-api-driver-or-somthing-simple/26769/13
+
+### Install and configure
+
+1. Open [StuCGM.groovy](StuCGM.groovy) and copy it into your own Hubitat driver editor. Before saving or running it, change the code values below for your setup. The repository contains an author's endpoint and dashboard defaults; these are not shared services or device settings.
+
+   | Code location | Default / what to change |
+   | --- | --- |
+   | `params.uri` in `sendSyncCmd()` | Replace the existing URL with your own Nightscout `/api/v1/entries/current.json` endpoint, reachable from the hub. The driver sends no authentication header or token by default; any access needed by your endpoint must be handled in your local copy. |
+   | `SGV = SGV/18` and `SGV = SGV.round(1)` | Converts the incoming mg/dL value to mmol/L with one decimal place. To retain mg/dL, remove both lines in your local copy and also change the thresholds to the same units. There is no unit-selection flag. |
+   | `low1`, `low2`, `high1`, `high2` | Defaults are `4`, `3`, `10`, `18`. The comparisons use `low2`, `low1` and `high1`; `high2` is declared but unused. These are code defaults, not recommended treatment thresholds. |
+   | `#tile-63` in `tileHtml` | If using `CustomTile2`, change this selector to your dashboard tile ID. |
+   | Image URL in `tileHtml` | Replace the local `https://192.168.10.1/` image host with your own reachable host. The code names `flatarrow.png`, `45uparrow.png`, `singlearrowup.png`, `doublearrowup.png`, `45downarrow.png`, `singlearrowdown.png` and `doublearrowdown.png`; these image files are not included in this repository. |
+
+2. In the hub web interface, open **Developer Tools → Drivers Code → New Driver**, paste your locally configured code, and select **Save**. See Hubitat's [custom driver guide](https://docs2.hubitat.com/en/developer/driver/overview).
+3. Open **Devices → Add Device → Virtual**, give the device a name, and choose **StuCGM** for **Type**. Complete the virtual-device creation form. See Hubitat's [Add Device guide](https://docs2.hubitat.com/en/user-interface/devices/add-device).
+4. Open the new device's detail page and run **Refresh**. A successful response supplies a JSON array whose first entry has `sgv` and `direction`; the driver updates the attributes below. Check **Logs** if the request fails. This driver defines no **Preferences** inputs and no **Configure** command.
 
 ### Attributes
 
