@@ -119,6 +119,10 @@ def uninstalled() {
 }
 
 def initialize() {
+    // Keep the hub's _googlecast._tcp mDNS cache warm for this app, and re-check the speakers' stored IPs
+    // on a timer, so a DHCP change is corrected before anyone presses the button (see healSpeakers).
+    registerMdns()
+    runEvery15Minutes("reconcileSpeakers")
     if (!state.accessToken) {
         try { createAccessToken() } catch (e) { log.warn "Glucose Announcer: could not create access token - ${e.message}" }
     }
@@ -234,6 +238,8 @@ private void announce(Map opts = [:]) {
     state.lastFire = now()
     state.attempt = 1
     state.opts = opts ?: [:]
+    // The endpoint takes 14-45s, so heal the speakers now and let their reconnect overlap the wait.
+    healSpeakers(selectTargets(opts), true)
     fetchLevels()
     // Leave the switch on while we fetch, so it reads as "working" rather than flipping off
     // ~10s before any sound arrives. The real auto-off is scheduled once the audio is dispatched;
@@ -309,17 +315,21 @@ private void retryOrFail(String reason) {
     }
 }
 
-private void playOnSpeakers(String trackUrl, Map opts = [:]) {
+private def selectTargets(Map opts = [:]) {
     def targets = settings.speakers
-    if (opts?.only) {
-        targets = targets?.findAll { it.id?.toString() == opts.only.toString() }
-        if (!targets) {
-            log.warn "Glucose Announcer: device ${opts.only} is not one of the selected speakers"
-            return
-        }
+    if (opts?.only) targets = targets?.findAll { it.id?.toString() == opts.only.toString() }
+    return targets
+}
+
+private void playOnSpeakers(String trackUrl, Map opts = [:]) {
+    def targets = selectTargets(opts)
+    if (opts?.only && !targets) {
+        log.warn "Glucose Announcer: device ${opts.only} is not one of the selected speakers"
+        return
     }
     if (!targets) {
         log.warn "Glucose Announcer: no speakers selected"
+        state.lastResult = "failed: no speakers selected (a re-added speaker has a new device id - reselect it on the app's page)"
         return
     }
     if (state.dryRun) {
@@ -347,24 +357,176 @@ private void playOnSpeakers(String trackUrl, Map opts = [:]) {
         state.volSnapshot = [:]
     }
 
-    targets.each { dev ->
-        try {
-            if (dev.hasCommand("playTrack")) {
-                if (vol != null) dev.playTrack(trackUrl, vol) else dev.playTrack(trackUrl)
-            } else if (dev.hasCommand("playTrackAndRestore")) {
-                if (vol != null) dev.playTrackAndRestore(trackUrl, vol) else dev.playTrackAndRestore(trackUrl)
-            } else {
-                log.warn "Glucose Announcer: ${dev.displayName} has no playTrack command"
-                return
-            }
-            logDebug "playOnSpeakers: sent to ${dev.displayName}"
-        } catch (e) {
-            log.error "Glucose Announcer: ${dev.displayName} failed - ${e.message}"
-        }
-    }
+    // Re-check right before sending: the speaker may have dropped or moved during the 14-45s fetch.
+    healSpeakers(targets, true)
+
+    state.lastTrack = trackUrl
+    state.lastVol = vol
+    state.retried = false
+    state.sentTo = targets.collect { it.id.toString() }
+    targets.each { dev -> sendTrack(dev, trackUrl, vol) }
 
     scheduleAutoOff()
     if (state.volSnapshot) runIn(4, "planVolumeRestore", [overwrite: true])
+    runIn(5, "verifyPlayback", [overwrite: true])
+}
+
+private void sendTrack(dev, String trackUrl, Integer vol) {
+    try {
+        if (dev.hasCommand("playTrack")) {
+            if (vol != null) dev.playTrack(trackUrl, vol) else dev.playTrack(trackUrl)
+        } else if (dev.hasCommand("playTrackAndRestore")) {
+            if (vol != null) dev.playTrackAndRestore(trackUrl, vol) else dev.playTrackAndRestore(trackUrl)
+        } else {
+            log.warn "Glucose Announcer: ${dev.displayName} has no playTrack command"
+            return
+        }
+        logDebug "sendTrack: sent to ${dev.displayName}"
+    } catch (e) {
+        log.error "Glucose Announcer: ${dev.displayName} failed - ${e.message}"
+    }
+}
+
+// ============================================================================
+// speaker self-healing
+//
+// The Chromecast+ driver keeps each speaker's IP in a data value that only its own app updates, and
+// that app only scans for 30 minutes after you open it. So once DHCP moves a speaker, the driver
+// connects to the old address, marks itself offline, DROPS the queued playTrack, and retries the same
+// dead address every 5 minutes forever. Nothing in the announcer noticed, because playTrack returns
+// normally either way. This section does what the driver's own app does on "Done" (correct the IP and
+// initialize the child), but on every press and on a timer instead of only while the app page is open.
+// ============================================================================
+
+private void registerMdns() {
+    try { registerMDNSListener("_googlecast._tcp") }
+    catch (e) { logDebug "registerMDNSListener unavailable - ${e.message}" }
+}
+
+private String normId(String s) { (s ?: "").replaceAll("[^A-Za-z0-9]", "").toLowerCase() }
+
+// RFC1918 only: a speaker never legitimately moves to a public or loopback address.
+private boolean isPrivateIp(String ip) {
+    def m = (ip ?: "") =~ /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/
+    if (!m.matches()) return false
+    int a = m[0][1] as Integer, b = m[0][2] as Integer
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168)
+}
+
+// dev.id -> [ip, port] for each selected speaker the hub's mDNS cache currently sees. Matched on the cast
+// uuid the driver stores (falling back to the uuid embedded in its DNI, then to a unique friendly name).
+// An empty or failed read is no evidence about any speaker, so it returns nothing rather than guessing.
+private Map lookupLiveSpeakers(devs) {
+    Map out = [:]
+    Map entries = null
+    try {
+        entries = hubitat.helper.NetworkUtils.getRawMDNSEndpointsByMACForServiceType("_googlecast._tcp.local.")
+    } catch (e) {
+        logDebug "mDNS lookup unavailable - ${e.message}"
+        return out
+    }
+    if (!entries) return out
+
+    List<Map> live = []
+    entries.each { mac, v ->
+        try {
+            if (v.ip4Address) {
+                live << [ip: v.ip4Address.toString(), port: (v.port ?: 8009).toString(),
+                         uuid: normId(v.deviceId?.toString()), name: v.friendlyName?.toString()]
+            }
+        } catch (ignored) { }
+    }
+
+    devs.each { dev ->
+        try {
+            // mDNS is unauthenticated, and a match decides where the speaker is told to connect. So a stored
+            // cast uuid must match exactly (full length); the weaker DNI / name fallbacks only apply to a
+            // device that has no uuid recorded at all, never to one whose uuid simply isn't in the cache.
+            String uuid = normId(dev.getDataValue("uuid"))
+            Map hit = null
+            if (uuid) {
+                hit = (uuid.length() >= 32) ? live.find { it.uuid == uuid } : null
+            } else {
+                String dni = normId(dev.deviceNetworkId)
+                hit = live.find { it.uuid.length() >= 32 && dni.endsWith(it.uuid) }
+                if (!hit) {
+                    String nm = dev.getDataValue("discoveredName")
+                    List byName = nm ? live.findAll { it.name == nm } : []
+                    if (byName.size() == 1) hit = byName[0]
+                }
+            }
+            if (hit && !isPrivateIp(hit.ip)) {
+                log.warn "Glucose Announcer: ignoring mDNS address ${hit.ip} for ${dev.displayName} - not a private LAN address"
+                hit = null
+            }
+            if (hit) out[dev.id.toString()] = hit
+        } catch (e) {
+            logDebug "lookupLiveSpeakers: ${dev.displayName} - ${e.message}"
+        }
+    }
+    return out
+}
+
+// Gets the speakers into a state playTrack can reach: corrects a stale IP, and (resetOffline) resets any
+// driver parked offline, which clears its dropped queue and dead-connection bookkeeping. Returns the ids
+// it reset. Must run BEFORE playTrack, because the driver's initialize() empties its pending actions.
+private List<String> healSpeakers(devs, boolean resetOffline) {
+    List<String> reset = []
+    if (!devs) return reset
+    Map fresh = lookupLiveSpeakers(devs)
+    devs.each { dev ->
+        try {
+            String id = dev.id.toString()
+            Map hit = fresh[id]
+            String oldIp = dev.getDataValue("ip")
+            boolean ipFixed = false
+            if (hit?.ip && hit.ip != oldIp) {
+                dev.updateDataValue("ip", hit.ip)
+                if (hit.port) dev.updateDataValue("port", hit.port)
+                log.warn "Glucose Announcer: ${dev.displayName} moved ${oldIp} -> ${hit.ip}, updated its driver"
+                ipFixed = true
+            }
+            boolean offline = (dev.currentValue("connectionStatus") == "offline") ||
+                              (dev.currentValue("playbackStatus") == "OFFLINE")
+            if (ipFixed || (resetOffline && offline)) {
+                if (dev.hasCommand("initialize")) dev.initialize()
+                else if (dev.hasCommand("reconnect")) dev.reconnect()
+                reset << id
+                logDebug "healSpeakers: reset ${dev.displayName} (${ipFixed ? 'ip changed' : 'was offline'})"
+            }
+        } catch (e) {
+            log.warn "Glucose Announcer: could not heal ${dev.displayName} - ${e.message}"
+        }
+    }
+    return reset
+}
+
+// Timer: fix moved speakers ahead of time. Offline-but-same-IP speakers are left to the driver's own retry.
+void reconcileSpeakers() { healSpeakers(settings.speakers, false) }
+
+private boolean isUnreachable(dev) {
+    return dev.currentValue("connectionStatus") == "offline" || dev.currentValue("playbackStatus") == "OFFLINE"
+}
+
+// playTrack returns normally even when the driver then fails to connect, so look at the speaker a few
+// seconds later. A driver whose connect fails marks itself offline within seconds; retry those once.
+void verifyPlayback() {
+    List<String> ids = state.sentTo ?: []
+    def failed = settings.speakers?.findAll { ids.contains(it.id.toString()) && isUnreachable(it) }
+    if (!failed) return
+    String names = failed*.displayName.join(", ")
+    if (state.retried) {
+        log.error "Glucose Announcer: ${names} still unreachable after retry"
+        state.lastResult = "failed: ${names} unreachable"
+        return
+    }
+    state.retried = true
+    log.warn "Glucose Announcer: ${names} did not take the announcement - healing and retrying once"
+    healSpeakers(failed, true)
+    failed.each { sendTrack(it, state.lastTrack as String, state.lastVol as Integer) }
+    state.sentTo = failed.collect { it.id.toString() }
+    if (state.volSnapshot) runIn(4, "planVolumeRestore", [overwrite: true])
+    runIn(5, "verifyPlayback", [overwrite: true])
 }
 
 // The clip length is only known once the speaker reports MEDIA_STATUS back, so wait a beat,
