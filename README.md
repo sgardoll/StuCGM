@@ -144,7 +144,7 @@ The Chromecast+ driver stores each speaker's IP in a device data value, and the 
 
 The announcer now handles this itself, using the hub's `_googlecast._tcp` mDNS cache (the same source the Chromecast+ app reads):
 
-- **On every press**, before the endpoint fetch and again just before playing, each selected speaker is matched to its live mDNS record by cast uuid (then by the uuid in its DNI, then by a unique friendly name). If the IP differs it is corrected (`ip` and `port` data values) and the driver is `initialize()`d, which is what the Chromecast+ app does on **Done**. A speaker parked `offline` at the same IP is also reset.
+- **On every press**, before the endpoint fetch and again just before playing, each selected speaker is matched to its live mDNS record by its full cast uuid. Only a speaker with no uuid recorded falls back to the uuid in its DNI, then a unique friendly name. mDNS is unauthenticated, so a speaker with a stored uuid is never matched by name, and an address outside the private ranges (10/8, 172.16/12, 192.168/16) is ignored. If the IP differs it is corrected (`ip` and `port` data values) and the driver is `initialize()`d, which is what the Chromecast+ app does on **Done**. A speaker parked `offline` at the same IP is also reset.
 - **Every 15 minutes**, moved speakers are corrected ahead of time. Offline speakers at an unchanged IP are left to the driver's own retry.
 - **After playing**, a speaker that reports `offline` within 5s is healed and sent the clip once more. A second failure is logged and shown as `Last run: failed: <speaker> unreachable`.
 - An empty or failed mDNS read is treated as no information and changes nothing.

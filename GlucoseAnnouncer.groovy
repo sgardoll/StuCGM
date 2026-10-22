@@ -405,6 +405,14 @@ private void registerMdns() {
 
 private String normId(String s) { (s ?: "").replaceAll("[^A-Za-z0-9]", "").toLowerCase() }
 
+// RFC1918 only: a speaker never legitimately moves to a public or loopback address.
+private boolean isPrivateIp(String ip) {
+    def m = (ip ?: "") =~ /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/
+    if (!m.matches()) return false
+    int a = m[0][1] as Integer, b = m[0][2] as Integer
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168)
+}
+
 // dev.id -> [ip, port] for each selected speaker the hub's mDNS cache currently sees. Matched on the cast
 // uuid the driver stores (falling back to the uuid embedded in its DNI, then to a unique friendly name).
 // An empty or failed read is no evidence about any speaker, so it returns nothing rather than guessing.
@@ -431,16 +439,25 @@ private Map lookupLiveSpeakers(devs) {
 
     devs.each { dev ->
         try {
+            // mDNS is unauthenticated, and a match decides where the speaker is told to connect. So a stored
+            // cast uuid must match exactly (full length); the weaker DNI / name fallbacks only apply to a
+            // device that has no uuid recorded at all, never to one whose uuid simply isn't in the cache.
             String uuid = normId(dev.getDataValue("uuid"))
-            Map hit = uuid ? live.find { it.uuid == uuid } : null
-            if (!hit) {
+            Map hit = null
+            if (uuid) {
+                hit = (uuid.length() >= 32) ? live.find { it.uuid == uuid } : null
+            } else {
                 String dni = normId(dev.deviceNetworkId)
-                hit = live.find { it.uuid && dni.endsWith(it.uuid) }
+                hit = live.find { it.uuid.length() >= 32 && dni.endsWith(it.uuid) }
+                if (!hit) {
+                    String nm = dev.getDataValue("discoveredName")
+                    List byName = nm ? live.findAll { it.name == nm } : []
+                    if (byName.size() == 1) hit = byName[0]
+                }
             }
-            if (!hit) {
-                String nm = dev.getDataValue("discoveredName")
-                List byName = nm ? live.findAll { it.name == nm } : []
-                if (byName.size() == 1) hit = byName[0]
+            if (hit && !isPrivateIp(hit.ip)) {
+                log.warn "Glucose Announcer: ignoring mDNS address ${hit.ip} for ${dev.displayName} - not a private LAN address"
+                hit = null
             }
             if (hit) out[dev.id.toString()] = hit
         } catch (e) {
