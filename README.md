@@ -137,3 +137,18 @@ GET  <base>/volume?access_token=<token>&dev=<id>&level=<n>
 - **Latency.** The switch stays on for the whole fetch and only auto-offs once audio has been dispatched, so a slow endpoint reads as "working" rather than as a failure. Presses are debounced for 20s so an impatient second press can't queue a duplicate announcement.
 - **Failure handling.** A non-200 response, or a body that isn't a URL, is retried once and then logged and dropped. Nothing is ever handed to `playTrack` unvalidated.
 - **The fetch is asynchronous** (`asynchttpGet`), so a slow endpoint never blocks a hub thread.
+
+### Speakers that move or drop off the network
+
+The Chromecast+ driver stores each speaker's IP in a device data value, and the only thing that refreshes it is the Chromecast+ app's own mDNS scan, which runs for 30 minutes after you open that app. Once DHCP moves a speaker, the driver keeps connecting to the old address, marks itself `offline`, drops the queued `playTrack`, and retries the same dead address every 5 minutes. `playTrack` still returns normally, so the announcement was lost without any error.
+
+The announcer now handles this itself, using the hub's `_googlecast._tcp` mDNS cache (the same source the Chromecast+ app reads):
+
+- **On every press**, before the endpoint fetch and again just before playing, each selected speaker is matched to its live mDNS record by cast uuid (then by the uuid in its DNI, then by a unique friendly name). If the IP differs it is corrected (`ip` and `port` data values) and the driver is `initialize()`d, which is what the Chromecast+ app does on **Done**. A speaker parked `offline` at the same IP is also reset.
+- **Every 15 minutes**, moved speakers are corrected ahead of time. Offline speakers at an unchanged IP are left to the driver's own retry.
+- **After playing**, a speaker that reports `offline` within 5s is healed and sent the clip once more. A second failure is logged and shown as `Last run: failed: <speaker> unreachable`.
+- An empty or failed mDNS read is treated as no information and changes nothing.
+
+Heal always runs before `playTrack`, because the driver's `initialize()` empties its pending actions.
+
+If a speaker is deleted and re-added in Hubitat it gets a new device id and drops out of the selection. The app then reports `no speakers selected` in `Last run`; reselect it on the app's page.
