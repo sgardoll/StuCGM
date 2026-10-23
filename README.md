@@ -152,4 +152,4 @@ The announcer handles this itself, using the hub's `_googlecast._tcp` mDNS cache
 
 Heal always runs before `playTrack`, because the driver's `initialize()` empties its pending actions.
 
-If a speaker is deleted and re-added in Hubitat it gets a new device id and drops out of the selection, so it still has to be reselected on the app's page. The app flags it: a previously configured speaker that has since disappeared is logged as a warning on the next press, and if that leaves nothing to play, `Last run` says `no speakers selected`.
+If a speaker is deleted and re-added in Hubitat it gets a new device id and drops out of the selection, so it still has to be reselected on the app's page. The app flags it: a previously configured speaker that has since disappeared raises a warning line on the app's page and in the log on the next press, and if that leaves nothing to play, `Last run` says `no speakers selected`.

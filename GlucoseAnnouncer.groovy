@@ -99,6 +99,7 @@ private String statusText() {
     def child = getChildDevice(childDni())
     String s = child ? "Switch device: <b>${child.displayName}</b>" : "Switch device will be created when you hit Done."
     if (state.lastResult) s += "<br>Last run: ${state.lastResult}"
+    if (state.speakerWarning) s += "<br>\u26a0 ${state.speakerWarning}"
     if (state.localEndpoint) s += "<br>Trigger URL: <code>${state.localEndpoint}</code>"
     return s
 }
@@ -142,6 +143,7 @@ def initialize() {
     state.localEndpoint = "${getFullLocalApiServerUrl()}/announce?access_token=${state.accessToken}"
     // Remember what was configured, so playOnSpeakers can tell when a speaker has since been deleted.
     state.configuredSpeakerIds = settings.speakers?.collect { it.id.toString() } ?: []
+    state.remove("speakerWarning")
 }
 
 // The mDNS listener is cleared on hub reboot; re-register so speaker healing keeps working.
@@ -367,7 +369,12 @@ private void playOnSpeakers(String trackUrl, Map opts = [:]) {
     List<String> configured = (state.configuredSpeakerIds ?: []) as List
     List<String> present = settings.speakers?.collect { it.id.toString() } ?: []
     List<String> missing = configured.findAll { !present.contains(it) }
-    if (missing) log.warn "Glucose Announcer: ${missing.size()} selected speaker(s) are no longer in Hubitat (a re-added speaker gets a new device id) - reselect them on the app's page"
+    if (missing) {
+        state.speakerWarning = "${missing.size()} selected speaker(s) are no longer in Hubitat - reselect them on the app's page"
+        log.warn "Glucose Announcer: ${state.speakerWarning}"
+    } else {
+        state.remove("speakerWarning")
+    }
 
     if (state.dry) {
         state.dry = false
@@ -579,7 +586,10 @@ void verifyPlayback() {
     long deadline = (state.verifyDeadline ?: 0) as Long
     List<String> ids = (state.sentTo ?: []) as List
     def targets = (settings.speakers ?: []).findAll { ids.contains(it.id.toString()) }
-    if (!targets) return
+    if (!targets) {
+        state.verifyDeadline = 0
+        return
+    }
     Map needResend = (state.needResend ?: [:]) as Map
     List<String> offline = []
     targets.each { dev ->
@@ -604,6 +614,8 @@ void verifyPlayback() {
         state.verifyPasses = ((state.verifyPasses ?: 0) as Integer) + 1
         if ((state.verifyPasses as Integer) >= VERIFY_PASSES_REQUIRED) {
             logDebug "verifyPlayback: all speakers took the announcement"
+            state.verifyDeadline = 0
+            state.needResend = [:]
             return
         }
     } else {
@@ -614,6 +626,8 @@ void verifyPlayback() {
         log.error "Glucose Announcer: ${names} still unreachable after ${VERIFY_DEADLINE_MS / 1000}s"
         state.lastResult = "failed: ${names} unreachable"
         state.needResend = [:]
+        state.verifyDeadline = 0
+        state.remove("volSnapshot")
         return
     }
     runIn(5, "verifyPlayback", [overwrite: true])
@@ -645,11 +659,18 @@ void planVolumeRestore() {
 
 void restoreVolumes() {
     Map snap = state.volSnapshot ?: [:]
-    state.volSnapshot = [:]
-    if (!snap) return
+    Map pending = (state.needResend ?: [:]) as Map
+    Map keep = [:]
     settings.speakers?.each { dev ->
-        def prior = snap[dev.id.toString()]
+        String id = dev.id.toString()
+        def prior = snap[id]
         if (prior == null) return
+        if (pending[id]) {
+            // Still away, and its queued play was dropped. Keep its snapshot so the volume is
+            // restored after verifyPlayback resends the clip.
+            keep[id] = prior
+            return
+        }
         try {
             dev.setVolume(prior as Integer)
             logDebug "restoreVolumes: ${dev.displayName} back to ${prior}"
@@ -657,6 +678,8 @@ void restoreVolumes() {
             log.warn "Glucose Announcer: could not restore ${dev.displayName} volume - ${e.message}"
         }
     }
+    if (keep) state.volSnapshot = keep
+    else state.remove("volSnapshot")
 }
 
 // ============================================================================
