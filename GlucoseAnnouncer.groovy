@@ -30,6 +30,9 @@ import groovy.transform.Field
 // The endpoint takes ~14s warm and up to ~45s cold, so the debounce has to outlast a round trip.
 // A 3s debounce let an impatient second press queue a duplicate announcement.
 @Field static final Integer DEBOUNCE_MS     = 20000
+// A speaker that is rebooting takes far longer than the old single 5s probe. Poll until it is back.
+@Field static final Long VERIFY_DEADLINE_MS = 120000
+@Field static final Integer VERIFY_PASSES_REQUIRED = 2
 
 // Device IDs pre-selected on first install, so the app works before anyone opens its page.
 // These are specific to one hub - on any other hub just pick the speakers on the app's page.
@@ -96,6 +99,7 @@ private String statusText() {
     def child = getChildDevice(childDni())
     String s = child ? "Switch device: <b>${child.displayName}</b>" : "Switch device will be created when you hit Done."
     if (state.lastResult) s += "<br>Last run: ${state.lastResult}"
+    if (state.speakerWarning) s += "<br>\u26a0 ${state.speakerWarning}"
     if (state.localEndpoint) s += "<br>Trigger URL: <code>${state.localEndpoint}</code>"
     return s
 }
@@ -110,6 +114,7 @@ def installed() {
 }
 
 def updated() {
+    unsubscribe()
     unschedule()
     initialize()
 }
@@ -121,6 +126,8 @@ def uninstalled() {
 def initialize() {
     // Keep the hub's _googlecast._tcp mDNS cache warm for this app, and re-check the speakers' stored IPs
     // on a timer, so a DHCP change is corrected before anyone presses the button (see healSpeakers).
+    // A hub reboot clears the listener, so it is also re-registered on systemStart.
+    subscribe(location, "systemStart", "bootHandler")
     registerMdns()
     runEvery15Minutes("reconcileSpeakers")
     if (!state.accessToken) {
@@ -134,7 +141,13 @@ def initialize() {
     }
     child.parse([[name: "switch", value: "off", descriptionText: "initialised"]])
     state.localEndpoint = "${getFullLocalApiServerUrl()}/announce?access_token=${state.accessToken}"
+    // Remember what was configured, so playOnSpeakers can tell when a speaker has since been deleted.
+    state.configuredSpeakerIds = settings.speakers?.collect { it.id.toString() } ?: []
+    state.remove("speakerWarning")
 }
+
+// The mDNS listener is cleared on hub reboot; re-register so speaker healing keeps working.
+void bootHandler(evt) { registerMdns() }
 
 // First install only: pick sensible defaults so the app works before anyone opens its page.
 private void bootstrapDefaults() {
@@ -208,8 +221,9 @@ def pressEndpoint() {
         return
     }
     state.dryRun = (params?.dry == "1")
+    boolean dry = (state.dryRun == true)   // announce() consumes the flag, so report it before the press
     child.on()   // goes through the driver, which calls back into componentOn()
-    render contentType: "text/plain", data: "pressed ${child.displayName} (dryRun=${state.dryRun})"
+    render contentType: "text/plain", data: "pressed ${child.displayName} (dryRun=${dry})"
 }
 
 def volumeEndpoint() {
@@ -229,6 +243,10 @@ def volumeEndpoint() {
 // ============================================================================
 
 private void announce(Map opts = [:]) {
+    // Consume the dry-run flag here so it cannot leak into a later press.
+    boolean dry = (state.dryRun == true)
+    state.dryRun = false
+    state.dry = dry
     Long last = state.lastFire as Long
     if (last && (now() - last) < DEBOUNCE_MS) {
         logDebug "announce: debounced (last fired ${now() - last}ms ago)"
@@ -247,7 +265,7 @@ private void announce(Map opts = [:]) {
     runIn(90, "autoOff", [overwrite: true])
 }
 
-private void fetchLevels() {
+void fetchLevels() {
     String url = (settings.endpointUrl ?: DEFAULT_ENDPOINT)?.trim()
     if (!url) {
         log.error "Glucose Announcer: no endpoint configured - set one on the app's page"
@@ -261,15 +279,39 @@ private void fetchLevels() {
     } catch (e) {
         log.error "Glucose Announcer: request failed to start - ${e.message}"
         state.lastResult = "request failed to start: ${e.message}"
+        scheduleAutoOff()
     }
 }
 
 void levelsResponse(resp, data) {
     Integer status = null
     String body = null
+    String url = null
 
     try { status = resp?.getStatus() } catch (ignored) { }
-    try { body = resp?.getData()?.toString()?.trim() } catch (ignored) { }
+
+    // The platform pre-parses a JSON content-type into a Map, and hands over text/plain as a String.
+    def raw = null
+    try { raw = resp?.getData() } catch (ignored) { }
+    if (raw instanceof Map) {
+        if (raw.url) url = raw.url as String
+        logDebug "levelsResponse: voiceResponse=${raw.voiceResponse}"
+    } else {
+        body = raw?.toString()?.trim()
+        if (body) {
+            try {
+                def parsed = new groovy.json.JsonSlurper().parseText(body)
+                if (parsed instanceof Map && parsed.url) {
+                    url = parsed.url as String
+                    logDebug "levelsResponse: voiceResponse=${parsed.voiceResponse}"
+                }
+            } catch (ignored) { }
+            // fall back to a bare URL string for backward compatibility
+            if (!url && (body ==~ /(?i)^https?:\/\/\S+$/)) {
+                url = body
+            }
+        }
+    }
 
     if (status != 200) {
         logDebug "levelsResponse: HTTP ${status} body=${body}"
@@ -277,20 +319,6 @@ void levelsResponse(resp, data) {
         return
     }
 
-    String url = null
-    if (body) {
-        try {
-            def parsed = new groovy.json.JsonSlurper().parseText(body)
-            if (parsed instanceof Map && parsed.url) {
-                url = parsed.url as String
-                logDebug "levelsResponse: voiceResponse=${parsed.voiceResponse}"
-            }
-        } catch (ignored) { }
-        // fall back to a bare URL string for backward compatibility
-        if (!url && (body ==~ /(?i)^https?:\/\/\S+$/)) {
-            url = body
-        }
-    }
     if (!url) {
         logDebug "levelsResponse: no url in body '${body}'"
         retryOrFail("endpoint did not return a URL")
@@ -325,15 +353,31 @@ private void playOnSpeakers(String trackUrl, Map opts = [:]) {
     def targets = selectTargets(opts)
     if (opts?.only && !targets) {
         log.warn "Glucose Announcer: device ${opts.only} is not one of the selected speakers"
+        state.lastResult = "failed: device ${opts.only} is not a selected speaker"
+        scheduleAutoOff()
         return
     }
     if (!targets) {
         log.warn "Glucose Announcer: no speakers selected"
         state.lastResult = "failed: no speakers selected (a re-added speaker has a new device id - reselect it on the app's page)"
+        scheduleAutoOff()
         return
     }
-    if (state.dryRun) {
-        state.dryRun = false
+
+    // A deleted speaker silently drops out of the selection, and a re-added one comes back with a new
+    // device id. Comparing what was configured against what is present is the only trace it leaves.
+    List<String> configured = (state.configuredSpeakerIds ?: []) as List
+    List<String> present = settings.speakers?.collect { it.id.toString() } ?: []
+    List<String> missing = configured.findAll { !present.contains(it) }
+    if (missing) {
+        state.speakerWarning = "${missing.size()} selected speaker(s) are no longer in Hubitat - reselect them on the app's page"
+        log.warn "Glucose Announcer: ${state.speakerWarning}"
+    } else {
+        state.remove("speakerWarning")
+    }
+
+    if (state.dry) {
+        state.dry = false
         log.info "Glucose Announcer: DRY RUN - would play ${trackUrl} on ${targets*.displayName}"
         state.lastResult = "dry run ${new Date().format('HH:mm:ss', location.timeZone)}"
         scheduleAutoOff()
@@ -362,9 +406,14 @@ private void playOnSpeakers(String trackUrl, Map opts = [:]) {
 
     state.lastTrack = trackUrl
     state.lastVol = vol
-    state.retried = false
     state.sentTo = targets.collect { it.id.toString() }
     targets.each { dev -> sendTrack(dev, trackUrl, vol) }
+    // Poll for up to VERIFY_DEADLINE_MS: see verifyPlayback. needResend tracks speakers written off as
+    // offline, so the clip can be sent again once they are back rather than assumed played.
+    state.needResend = [:]
+    state.verifyPasses = 0
+    state.verifyDeadline = now() + VERIFY_DEADLINE_MS
+    state.durationProbes = 0
 
     scheduleAutoOff()
     if (state.volSnapshot) runIn(4, "planVolumeRestore", [overwrite: true])
@@ -399,8 +448,15 @@ private void sendTrack(dev, String trackUrl, Integer vol) {
 // ============================================================================
 
 private void registerMdns() {
-    try { registerMDNSListener("_googlecast._tcp") }
-    catch (e) { logDebug "registerMDNSListener unavailable - ${e.message}" }
+    try {
+        registerMDNSListener("_googlecast._tcp")
+        state.mdnsWarned = false
+    } catch (e) {
+        if (!state.mdnsWarned) {
+            state.mdnsWarned = true
+            log.warn "Glucose Announcer: mDNS listener unavailable (needs firmware 2.4.1.151+) - speaker IP self-healing is disabled: ${e.message}"
+        }
+    }
 }
 
 private String normId(String s) { (s ?: "").replaceAll("[^A-Za-z0-9]", "").toLowerCase() }
@@ -441,11 +497,12 @@ private Map lookupLiveSpeakers(devs) {
         try {
             // mDNS is unauthenticated, and a match decides where the speaker is told to connect. So a stored
             // cast uuid must match exactly (full length); the weaker DNI / name fallbacks only apply to a
-            // device that has no uuid recorded at all, never to one whose uuid simply isn't in the cache.
+            // device whose recorded uuid is missing or too short to match on, never to one whose uuid simply
+            // isn't in the cache.
             String uuid = normId(dev.getDataValue("uuid"))
             Map hit = null
-            if (uuid) {
-                hit = (uuid.length() >= 32) ? live.find { it.uuid == uuid } : null
+            if (uuid?.length() >= 32) {
+                hit = live.find { it.uuid == uuid }
             } else {
                 String dni = normId(dev.deviceNetworkId)
                 hit = live.find { it.uuid.length() >= 32 && dni.endsWith(it.uuid) }
@@ -481,13 +538,15 @@ private List<String> healSpeakers(devs, boolean resetOffline) {
             String oldIp = dev.getDataValue("ip")
             boolean ipFixed = false
             if (hit?.ip && hit.ip != oldIp) {
+                // initialize() does not close an open socket, so drop the live connection first or the
+                // driver keeps talking to the old address.
+                try { if (dev.hasCommand("disconnect")) dev.disconnect() } catch (ignored) { }
                 dev.updateDataValue("ip", hit.ip)
                 if (hit.port) dev.updateDataValue("port", hit.port)
                 log.warn "Glucose Announcer: ${dev.displayName} moved ${oldIp} -> ${hit.ip}, updated its driver"
                 ipFixed = true
             }
-            boolean offline = (dev.currentValue("connectionStatus") == "offline") ||
-                              (dev.currentValue("playbackStatus") == "OFFLINE")
+            boolean offline = isUnreachable(dev)
             if (ipFixed || (resetOffline && offline)) {
                 if (dev.hasCommand("initialize")) dev.initialize()
                 else if (dev.hasCommand("reconnect")) dev.reconnect()
@@ -502,30 +561,75 @@ private List<String> healSpeakers(devs, boolean resetOffline) {
 }
 
 // Timer: fix moved speakers ahead of time. Offline-but-same-IP speakers are left to the driver's own retry.
-void reconcileSpeakers() { healSpeakers(settings.speakers, false) }
-
-private boolean isUnreachable(dev) {
-    return dev.currentValue("connectionStatus") == "offline" || dev.currentValue("playbackStatus") == "OFFLINE"
-}
-
-// playTrack returns normally even when the driver then fails to connect, so look at the speaker a few
-// seconds later. A driver whose connect fails marks itself offline within seconds; retry those once.
-void verifyPlayback() {
-    List<String> ids = state.sentTo ?: []
-    def failed = settings.speakers?.findAll { ids.contains(it.id.toString()) && isUnreachable(it) }
-    if (!failed) return
-    String names = failed*.displayName.join(", ")
-    if (state.retried) {
-        log.error "Glucose Announcer: ${names} still unreachable after retry"
-        state.lastResult = "failed: ${names} unreachable"
+void reconcileSpeakers() {
+    registerMdns()   // cheap and idempotent; a hub reboot clears the listener
+    // An in-flight announcement owns the children's pending actions; initialize() would wipe them.
+    if (state.verifyDeadline && now() < (state.verifyDeadline as Long)) {
+        logDebug "reconcileSpeakers: announcement in flight - deferring"
         return
     }
-    state.retried = true
-    log.warn "Glucose Announcer: ${names} did not take the announcement - healing and retrying once"
-    healSpeakers(failed, true)
-    failed.each { sendTrack(it, state.lastTrack as String, state.lastVol as Integer) }
-    state.sentTo = failed.collect { it.id.toString() }
-    if (state.volSnapshot) runIn(4, "planVolumeRestore", [overwrite: true])
+    healSpeakers(settings.speakers, false)
+}
+
+private boolean isUnreachable(dev) {
+    String conn = dev.currentValue("connectionStatus")?.toString()
+    String play = dev.currentValue("playbackStatus")?.toString()
+    return "offline".equalsIgnoreCase(conn) || "disconnected".equalsIgnoreCase(conn) ||
+           "OFFLINE".equalsIgnoreCase(play)
+}
+
+// playTrack returns normally even when the driver then fails to connect, and the driver defers
+// connect(), so one sample at 5s is not evidence. Poll until every speaker has either taken the
+// track or been written off. The driver drops queued actions when it goes offline, so a speaker
+// that comes back is sent the clip again rather than assumed to have played it.
+void verifyPlayback() {
+    long deadline = (state.verifyDeadline ?: 0) as Long
+    List<String> ids = (state.sentTo ?: []) as List
+    def targets = (settings.speakers ?: []).findAll { ids.contains(it.id.toString()) }
+    if (!targets) {
+        state.verifyDeadline = 0
+        return
+    }
+    Map needResend = (state.needResend ?: [:]) as Map
+    List<String> offline = []
+    targets.each { dev ->
+        String id = dev.id.toString()
+        if (isUnreachable(dev)) {
+            offline << id
+            needResend[id] = true
+        } else if (needResend[id]) {
+            log.warn "Glucose Announcer: ${dev.displayName} is reachable again - sending the announcement"
+            sendTrack(dev, state.lastTrack as String, state.lastVol as Integer)
+            needResend.remove(id)
+            if (state.volSnapshot) runIn(4, "planVolumeRestore", [overwrite: true])
+        }
+    }
+    state.needResend = needResend
+    if (offline) {
+        log.warn "Glucose Announcer: ${offline.size()} speaker(s) offline - healing and waiting for reconnect"
+        healSpeakers(targets.findAll { offline.contains(it.id.toString()) }, true)
+    }
+    boolean waiting = offline || needResend
+    if (!waiting) {
+        state.verifyPasses = ((state.verifyPasses ?: 0) as Integer) + 1
+        if ((state.verifyPasses as Integer) >= VERIFY_PASSES_REQUIRED) {
+            logDebug "verifyPlayback: all speakers took the announcement"
+            state.verifyDeadline = 0
+            state.needResend = [:]
+            return
+        }
+    } else {
+        state.verifyPasses = 0
+    }
+    if (now() >= deadline) {
+        String names = targets.findAll { needResend.containsKey(it.id.toString()) }*.displayName.join(", ")
+        log.error "Glucose Announcer: ${names} still unreachable after ${VERIFY_DEADLINE_MS / 1000}s"
+        state.lastResult = "failed: ${names} unreachable"
+        state.needResend = [:]
+        state.verifyDeadline = 0
+        state.remove("volSnapshot")
+        return
+    }
     runIn(5, "verifyPlayback", [overwrite: true])
 }
 
@@ -539,6 +643,15 @@ void planVolumeRestore() {
             if (d != null) { BigDecimal bd = d as BigDecimal; if (bd > maxDur) maxDur = bd }
         }
     }
+    // mediaDuration only arrives with the speaker's MEDIA_STATUS, and a speaker that is still connecting
+    // has not reported it yet. Committing to the 6s fallback here would restore the volume into the clip,
+    // so re-probe a few times first.
+    if (maxDur <= 0 && ((state.durationProbes ?: 0) as Integer) < 3) {
+        state.durationProbes = ((state.durationProbes ?: 0) as Integer) + 1
+        runIn(4, "planVolumeRestore", [overwrite: true])
+        return
+    }
+    state.durationProbes = 0
     Integer wait = Math.max(6, maxDur.intValue() + 3)
     logDebug "planVolumeRestore: clip ${maxDur}s -> restoring volume in ${wait}s"
     runIn(wait, "restoreVolumes", [overwrite: true])
@@ -546,11 +659,18 @@ void planVolumeRestore() {
 
 void restoreVolumes() {
     Map snap = state.volSnapshot ?: [:]
-    state.volSnapshot = [:]
-    if (!snap) return
+    Map pending = (state.needResend ?: [:]) as Map
+    Map keep = [:]
     settings.speakers?.each { dev ->
-        def prior = snap[dev.id.toString()]
+        String id = dev.id.toString()
+        def prior = snap[id]
         if (prior == null) return
+        if (pending[id]) {
+            // Still away, and its queued play was dropped. Keep its snapshot so the volume is
+            // restored after verifyPlayback resends the clip.
+            keep[id] = prior
+            return
+        }
         try {
             dev.setVolume(prior as Integer)
             logDebug "restoreVolumes: ${dev.displayName} back to ${prior}"
@@ -558,6 +678,8 @@ void restoreVolumes() {
             log.warn "Glucose Announcer: could not restore ${dev.displayName} volume - ${e.message}"
         }
     }
+    if (keep) state.volSnapshot = keep
+    else state.remove("volSnapshot")
 }
 
 // ============================================================================
